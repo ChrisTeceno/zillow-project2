@@ -1,11 +1,13 @@
 import pandas as pd
 import os
 from env import get_db_url
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
 
 # get_zillow_data while maintaining my original query from previous project
 def get_zillow_data(use_cache=True):
     """pull from SQL unless zillow.csv exists"""
-    filename = "zillow2.csv"
+    filename = "zillow.csv"
     if os.path.isfile(filename) and use_cache:
         print("Reading from csv...")
         return pd.read_csv(filename)
@@ -133,6 +135,93 @@ def drop_replace_nulls(df):
     return df
 
 
+def split_data(df, y_value, stratify=False):
+    """ General use function to split data into train and test sets. 
+    Stratify = True is helpful for categorical y values"""
+    # split the data set with stratifiy if True
+    if stratify:
+        train, test = train_test_split(
+            df, test_size=0.2, random_state=42, stratify=df[y_value]
+        )
+        train, validate = train_test_split(
+            train, test_size=0.3, random_state=42, stratify=train[y_value]
+        )
+    else:  # if stratify is false (for non-categorical y values)
+        train, test = train_test_split(df, test_size=0.2, random_state=42)
+        train, validate = train_test_split(train, test_size=0.3, random_state=42)
+    return (train, validate, test)
+
+
+def convert_fips(df):
+    """convert fips to string then dummy encode"""
+    # convert fips to county name
+    df["fips"] = df["fips"].replace(
+        {6037.0: "la_county", 6059.0: "orange_county", 6111.0: "ventura_county"}
+    )
+    # make dummy columns for fips
+    df = pd.concat(
+        [
+            df,
+            (
+                pd.get_dummies(
+                    df[["fips"]],
+                    dummy_na=False,
+                    drop_first=False,  # i did not drop first to make it more human readable
+                )
+            ),
+        ],
+        axis=1,
+    )
+    return df
+
+
+def detect_outliers(df, col, k=1.5):
+    """look for outliers in a column of a dataframe using IQR, k"""
+    q1 = df[col].quantile(0.25)
+    q3 = df[col].quantile(0.75)
+    iqr = q3 - q1
+    lower_bound = q1 - (iqr * k)
+    upper_bound = q3 + (iqr * k)
+    return df[(df[col] < lower_bound) | (df[col] > upper_bound)]
+
+
+def remove_outliers(df, k=1.5):
+    """remove outliers from all quantitative variables"""
+    for col in df.select_dtypes(include=["int64", "float64"]).columns:
+        df = df[~df[col].index.isin(detect_outliers(df, col, k).index)]
+    return df
+
+
+def make_dummies(df, col):
+    """make dummy columns for a column in a dataframe"""
+    df = pd.concat(
+        [df, pd.get_dummies(df[col], dummy_na=False, drop_first=True)], axis=1
+    )
+    return df
+
+
+def bin(df, col, bins):
+    """bin a column of a dataframe"""
+    df[col] = pd.cut(df[col], bins, labels=False)
+    return df
+
+
+def handle_transactiondate(df):
+    """'convert transactiondate to datetime then string quarter then dummy encode"""
+    df = df.copy()
+    df["transactiondate"] = pd.to_datetime(df["transactiondate"])
+    df["transactiondate"] = df["transactiondate"].dt.quarter
+    # add 1 to the transactiondate column
+    df["transactiondate"] = df["transactiondate"] + 1
+    # convert to string
+    df["transactiondate"] = df["transactiondate"].astype(str)
+    # add useful info
+    df["transactiondate"] = "q" + df["transactiondate"] + " transactiondate"
+    df = make_dummies(df, "transactiondate")
+    df.drop(["transactiondate"], axis=1, inplace=True)
+    return df
+
+
 def wrangle_zillow(use_cache=True):
     """wrangle zillow data"""
     filename = "prepped_zillow.csv"
@@ -140,6 +229,18 @@ def wrangle_zillow(use_cache=True):
         print("Reading prepped data from csv...")
         return pd.read_csv(filename)
     df = get_zillow_data()
+    df = clear_parcel_id_duplicates(df)
+    df = remove_outliers(df)
+    df = get_single_units(df)
+    df = handle_missing_values(df)
+    df = drop_replace_nulls(df)
+    df = handle_transactiondate(df)
+    df.propertylandusedesc = "usecode" + df.propertylandusedesc
+    df = make_dummies(df, "propertycountylandusecode")
+    # convert year built to age
+    df["age"] = 2017 - df["yearbuilt"]
+    # below is not need becasue we end up with la county only after removing outliers and nulls
+    # df = convert_fips(df)
     # drop collumns that are redundant
     columns_to_drop = [
         "id",
@@ -147,12 +248,91 @@ def wrangle_zillow(use_cache=True):
         "calculatedbathnbr",
         "finishedsquarefeet12",
         "fullbathcnt",
+        "roomcnt",
+        "yearbuilt",
+        "fips",
+        "parcelid",
+        "propertylandusetypeid",
+        "regionidcounty",
+        "unitcnt",
+        "assessmentyear",
+        "propertylandusedesc",
+        "propertycountylandusecode",
+        "heatingorsystemdesc",
+        "propertyzoningdesc",
     ]
     df.drop(columns_to_drop, axis=1, inplace=True)
-    df = clear_parcel_id_duplicates(df)
-    df = get_single_units(df)
-    df = handle_missing_values(df)
-    df = drop_replace_nulls(df)
     print("Saving to csv in local directory...")
     df.to_csv(filename, index=False)
     return df
+
+
+def split_train_validate_test(df, y_value, stratify=False):
+    """ General use function to split data into train and test sets. 
+    Stratify = True is helpful for categorical y values"""
+    # split the data set with stratifiy if True
+    if stratify:
+        train, test = train_test_split(
+            df, test_size=0.2, random_state=42, stratify=df[y_value]
+        )
+        train, validate = train_test_split(
+            train, test_size=0.3, random_state=42, stratify=train[y_value]
+        )
+    else:  # if stratify is false (for non-categorical y values)
+        train, test = train_test_split(df, test_size=0.2, random_state=42)
+        train, validate = train_test_split(train, test_size=0.3, random_state=42)
+    return (train, validate, test)
+
+
+def split_x_y(df, y_value):
+    """split data into x and y"""
+    x = df.drop(columns=[y_value])
+    y = df[y_value]
+    return x, y
+
+
+def split_data(df, y_value="logerror"):
+    """
+    split data into train, validate, and test sets
+    """
+    # split data in to train, validate, and test sets
+    train, validate, test = split_train_validate_test(df, y_value)
+    # split train, validate, and test into x and y
+    X_train, y_train = split_x_y(train, y_value)
+    X_validate, y_validate = split_x_y(validate, y_value)
+    X_test, y_test = split_x_y(test, y_value)
+    return (
+        train,
+        validate,
+        test,
+        X_train,
+        y_train,
+        X_validate,
+        y_validate,
+        X_test,
+        y_test,
+    )
+
+
+def scale_numeric_columns(X_train, X_validate, X_test, scaler=MinMaxScaler()):
+    """scale numeric columns after fitting on training set"""
+    X_train = X_train.copy()
+    X_validate = X_validate.copy()
+    X_test = X_test.copy()
+    # choose numerical columns
+    numerical_cols = X_train.select_dtypes(include=["int64", "float64"]).columns
+    X_train[numerical_cols] = scaler.fit_transform(X_train[numerical_cols])
+    # transform validation data
+    X_validate[numerical_cols] = scaler.transform(X_validate[numerical_cols])
+    # transform test data
+    X_test[numerical_cols] = scaler.transform(X_test[numerical_cols])
+    return X_train, X_validate, X_test
+
+
+def basic_info(df):
+    """print some basic information about the dataframe"""
+    print(df.info())
+    print(df.describe())
+    print("\n")
+    print("null counts:")
+    print(df.isnull().sum())
